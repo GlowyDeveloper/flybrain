@@ -177,6 +177,7 @@ name = "flybrain"
 version = "0.1.0"
 dependencies = [
  "smithay",
+ "tracing",
  "tracing-subscriber",
 ]
 

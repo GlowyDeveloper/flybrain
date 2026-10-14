@@ -1,18 +1,27 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::{framebuffer::SharedFrame, input::InputEvent, window::UserEvent};
 use smithay::{
+    backend::input::{Axis, ButtonState, KeyState},
     delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
     delegate_xdg_shell,
-    input::{Seat, SeatHandler, SeatState, pointer::CursorImageStatus},
+    input::{
+        Seat, SeatHandler, SeatState,
+        keyboard::FilterResult,
+        pointer::{AxisFrame, ButtonEvent, CursorImageStatus, MotionEvent},
+    },
     reexports::wayland_server::{
         Client, Resource,
         backend::{ClientData, ClientId, DisconnectReason},
         protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface},
     },
-    utils::Serial,
+    utils::{SERIAL_COUNTER, Serial},
     wayland::{
         buffer::BufferHandler,
         compositor::{
             BufferAssignment, CompositorClientState, CompositorHandler, CompositorState,
-            SurfaceAttributes, with_states,
+            SurfaceAttributes, TraversalAction, get_parent, with_states,
+            with_surface_tree_downward,
         },
         output::OutputHandler,
         selection::{
@@ -22,12 +31,13 @@ use smithay::{
             },
         },
         shell::xdg::{
-            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState, XdgToplevelSurfaceData
+            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
         },
         shm::{ShmHandler, ShmState, with_buffer_contents},
     },
 };
-use tracing::{info, warn};
+use tracing::{info, trace};
+use winit::event_loop::EventLoopProxy;
 
 pub struct ClientState {
     pub compositor_state: CompositorClientState,
@@ -47,11 +57,121 @@ pub struct State {
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
     pub seat_state: SeatState<State>,
-    pub _seat: Seat<State>,
+    pub seat: Seat<State>,
     pub shm_state: ShmState,
     pub data_device_state: DataDeviceState,
 
     pub windows: Vec<ToplevelSurface>,
+    pub cursor: CursorImageStatus,
+
+    pub shared_frame: SharedFrame,
+    pub proxy: EventLoopProxy<UserEvent>,
+}
+
+impl State {
+    pub fn process_input_event(&mut self, event: InputEvent) {
+        match event {
+            InputEvent::Keyboard {
+                keycode,
+                pressed,
+                time,
+            } => {
+                let serial = SERIAL_COUNTER.next_serial();
+                if let Some(keyboard) = self.seat.get_keyboard() {
+                    keyboard.input::<(), _>(
+                        self,
+                        (keycode + 8).into(),
+                        if pressed {
+                            KeyState::Pressed
+                        } else {
+                            KeyState::Released
+                        },
+                        serial,
+                        time,
+                        |_, _, _| FilterResult::Forward,
+                    );
+                }
+            }
+            InputEvent::PointerMotion { x, y, time } => {
+                let serial = SERIAL_COUNTER.next_serial();
+                if let Some(pointer) = self.seat.get_pointer() {
+                    let focus = self
+                        .windows
+                        .first()
+                        .map(|w| (w.wl_surface().clone(), (0.0, 0.0).into()));
+
+                    pointer.motion(
+                        self,
+                        focus,
+                        &MotionEvent {
+                            location: (x, y).into(),
+                            serial,
+                            time,
+                        },
+                    );
+                    pointer.frame(self);
+                }
+            }
+            InputEvent::PointerButton {
+                button,
+                pressed,
+                time,
+            } => {
+                let serial = SERIAL_COUNTER.next_serial();
+                if let Some(pointer) = self.seat.get_pointer() {
+                    pointer.button(
+                        self,
+                        &ButtonEvent {
+                            button,
+                            state: if pressed {
+                                ButtonState::Pressed
+                            } else {
+                                ButtonState::Released
+                            },
+                            serial,
+                            time,
+                        },
+                    );
+                    pointer.frame(self);
+                }
+            }
+            InputEvent::PointerAxis {
+                horizontal,
+                vertical,
+                time,
+            } => {
+                if let Some(pointer) = self.seat.get_pointer() {
+                    let frame = AxisFrame::new(time)
+                        .value(Axis::Horizontal, horizontal)
+                        .value(Axis::Vertical, vertical);
+                    pointer.axis(self, frame);
+                    pointer.frame(self);
+                }
+            }
+            InputEvent::CloseRequest => {
+                for window in &self.windows {
+                    window.send_close();
+                }
+            }
+            InputEvent::Resize { height, width } => {
+                for window in &self.windows {
+                    window.with_pending_state(|state| {
+                        state.size = Some((width as i32, height as i32).into());
+                    });
+
+                    window.send_configure();
+                }
+            }
+        }
+    }
+
+    fn root_surface(surface: &WlSurface) -> WlSurface {
+        let mut current = surface.clone();
+        while let Some(parent) = get_parent(&current) {
+            current = parent;
+        }
+        current
+    }
 }
 
 impl CompositorHandler for State {
@@ -64,45 +184,79 @@ impl CompositorHandler for State {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
-        info!("Surface committed: {:?}", surface.id());
+        let root = Self::root_surface(surface);
 
-        let capture = match crate::WINDOW.lock().unwrap().as_ref() {
-            Some(window_name) => self.windows.iter().any(|window| {
-                if window.wl_surface() != surface {
-                    return false;
-                }
-        
-                with_states(window.wl_surface(), |states| {
-                    states
-                        .data_map
-                        .get::<XdgToplevelSurfaceData>()
-                        .map(|data| {
-                            data.lock().unwrap().title.as_deref()
-                                == Some(window_name.as_str())
-                        })
-                        .unwrap_or(false)
-                })
-            }),
-            None => true,
-        };
+        trace!(
+            "commit: surface={:?} root={:?} known_toplevels={:?}",
+            surface.id(),
+            root.id(),
+            self.windows
+                .iter()
+                .map(|w| w.wl_surface().id())
+                .collect::<Vec<_>>()
+        );
+
+        let is_toplevel_surface = self.windows.iter().any(|w| *w.wl_surface() == root);
+        if !is_toplevel_surface {
+            trace!("commit: rejected, root not in known toplevels");
+            return;
+        }
 
         let buffer = with_states(surface, |states| {
             let mut attributes = states.cached_state.get::<SurfaceAttributes>();
-
             let attributes = attributes.current();
-
             match &attributes.buffer {
                 Some(BufferAssignment::NewBuffer(buffer)) => Some(buffer.clone()),
-                _ => None,
+                Some(BufferAssignment::Removed) => None,
+                None => None,
             }
         });
-
-        if let Some(buffer) = buffer.filter(|_| capture) {
+        if let Some(buffer) = buffer {
             with_buffer_contents(&buffer, |ptr, len, metadata| {
-                warn!("Got buffer: ptr={:?}, len={}, metadata={:?}", ptr, len, metadata);
+                trace!("New buffer content");
+                let (width, height, stride) = (metadata.width, metadata.height, metadata.stride);
+                let mut frame = self.shared_frame.lock().unwrap();
+                frame.width = width as u32;
+                frame.height = height as u32;
+                frame.pixels.resize((width * height) as usize, 0);
+
+                let src = unsafe { std::slice::from_raw_parts(ptr, len) };
+                for y in 0..height as usize {
+                    let row_start = y * stride as usize;
+                    let row = &src[row_start..row_start + width as usize * 4];
+                    for x in 0..width as usize {
+                        let b = row[x * 4] as u32;
+                        let g = row[x * 4 + 1] as u32;
+                        let r = row[x * 4 + 2] as u32;
+                        frame.pixels[y * width as usize + x] = (r << 16) | (g << 8) | b;
+                    }
+                }
             })
             .unwrap();
+
+            self.proxy
+                .send_event(UserEvent::FrameReady(self.cursor.clone()))
+                .ok();
         }
+
+        let time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u32;
+
+        with_surface_tree_downward(
+            &root,
+            (),
+            |_, _, _| TraversalAction::DoChildren(()),
+            |_surf, states, _| {
+                let mut attrs = states.cached_state.get::<SurfaceAttributes>();
+                let attrs = attrs.current();
+                for callback in attrs.frame_callbacks.drain(..) {
+                    callback.done(time);
+                }
+            },
+            |_, _, _| true,
+        );
     }
 }
 
@@ -115,8 +269,12 @@ impl XdgShellHandler for State {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         info!("New toplevel: {:?}", surface.wl_surface().id());
-
         surface.send_configure();
+
+        let serial = SERIAL_COUNTER.next_serial();
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.set_focus(self, Some(surface.wl_surface().clone()), serial);
+        }
 
         self.windows.push(surface);
     }
@@ -150,7 +308,9 @@ impl SeatHandler for State {
         &mut self.seat_state
     }
 
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        self.cursor = image;
+    }
 
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
 }

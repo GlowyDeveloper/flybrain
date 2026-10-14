@@ -1,6 +1,11 @@
-use crate::state::{ClientState, State};
+use crate::{
+    framebuffer::{FrameBuffer, SharedFrame},
+    input::InputEvent,
+    state::{ClientState, State},
+    window::{App, UserEvent},
+};
 use smithay::{
-    input::{SeatState, keyboard::XkbConfig},
+    input::{SeatState, keyboard::XkbConfig, pointer::CursorImageStatus},
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::wayland_server::{Display, ListeningSocket, protocol::wl_shm::Format},
     utils::Transform,
@@ -13,11 +18,15 @@ use smithay::{
 };
 use std::{
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
 };
 use tracing::{Level, debug, error, info};
+use winit::event_loop::EventLoop;
 
+pub mod framebuffer;
+pub mod input;
 pub mod state;
+pub mod window;
 
 pub const HEADER: &str = "\x1b[95m";
 pub const GREEN: &str = "\x1b[92m";
@@ -152,16 +161,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let data_device_state = DataDeviceState::new::<State>(&display.handle());
 
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
+    let proxy = event_loop.create_proxy();
+    let shared_frame: SharedFrame = Arc::new(Mutex::new(FrameBuffer::new()));
+
     let mut state = State {
         compositor_state,
         xdg_shell_state,
         seat_state,
-        _seat: seat,
+        seat: seat,
         shm_state,
         data_device_state,
 
         windows: Vec::new(),
-        
+        cursor: CursorImageStatus::default_named(),
+
+        shared_frame: shared_frame.clone(),
+        proxy,
     };
 
     info!("Created seat");
@@ -204,7 +220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .spawn(|| {
             launch_app(cmd).map_or_else(
                 |e| {
-                    error!("Error: {}", e);
+                    error!(e);
                     std::process::exit(1)
                 },
                 |code| std::process::exit(code),
@@ -213,21 +229,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Created launcher thread");
 
-    loop {
-        if let Some(stream) = socket.accept()? {
-            info!("New client");
+    let (input_tx, input_rx) = mpsc::channel::<InputEvent>();
 
-            display.handle().insert_client(
-                stream,
-                Arc::new(ClientState {
-                    compositor_state: CompositorClientState::default(),
-                }),
-            )?;
-        }
+    std::thread::Builder::new()
+        .name("client_listener".to_string())
+        .spawn(move || {
+            loop {
+                while let Ok(event) = input_rx.try_recv() {
+                    state.process_input_event(event);
+                }
 
-        display.dispatch_clients(&mut state)?;
-        display.flush_clients()?;
-    }
+                if let Ok(Some(stream)) = socket.accept().map_err(|e| {
+                    error!("{}", e);
+                    std::process::exit(1);
+                }) {
+                    info!("New client");
+
+                    display
+                        .handle()
+                        .insert_client(
+                            stream,
+                            Arc::new(ClientState {
+                                compositor_state: CompositorClientState::default(),
+                            }),
+                        )
+                        .map_err(|e| {
+                            error!("{}", e);
+                            std::process::exit(1);
+                        });
+                }
+
+                display.dispatch_clients(&mut state).map_err(|e| {
+                    error!("{}", e);
+                    std::process::exit(1);
+                });
+                display.flush_clients().map_err(|e| {
+                    error!("{}", e);
+                    std::process::exit(1);
+                });
+            }
+        })?;
+
+    info!("Created client_listener thread");
+
+    let mut app = App::new(shared_frame, input_tx);
+    event_loop.run_app(&mut app)?;
+
+    Ok(())
 }
 
 fn launch_app(cmd: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {

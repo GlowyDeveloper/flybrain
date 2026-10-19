@@ -13,11 +13,12 @@ use winit::{
     event::{ElementState, MouseScrollDelta, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::PhysicalKey,
-    window::{CursorIcon, Window, WindowAttributes, WindowId},
+    window::{CursorIcon, Fullscreen, Window, WindowAttributes, WindowId},
 };
 
 pub enum UserEvent {
     FrameReady(CursorImageStatus),
+    FullscreenRequest(bool),
 }
 
 pub struct App {
@@ -66,8 +67,9 @@ impl ApplicationHandler<UserEvent> for App {
         let window = Rc::new(event_loop.create_window(attr).unwrap());
         let context = Context::new(window.clone()).unwrap();
         let surface = Surface::new(&context, window.clone()).unwrap();
-        self.window = Some(window);
+        self.window = Some(window.clone());
         self.surface = Some(surface);
+        window.request_redraw();
     }
 
     fn window_event(&mut self, _event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -95,14 +97,12 @@ impl ApplicationHandler<UserEvent> for App {
                 if event.repeat {
                     return;
                 }
-                if let PhysicalKey::Code(code) = event.physical_key {
-                    if let Some(keycode) = linux_keycode(code) {
+                if let PhysicalKey::Code(code) = event.physical_key && let Some(keycode) = linux_keycode(code) {
                         let _ = self.input_tx.send(InputEvent::Keyboard {
                             keycode,
                             pressed: event.state == ElementState::Pressed,
                             time: self.now(),
                         });
-                    }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -146,6 +146,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let _ = self.input_tx.send(InputEvent::Resize {
                     height: h,
                     width: w,
+                    time: self.now(),
                 });
             }
             _ => {}
@@ -153,43 +154,52 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
-        if let Some(window) = &self.window
-            && let UserEvent::FrameReady(cursor) = event
-        {
-            match cursor {
-                CursorImageStatus::Named(icon_name) => {
-                    window.set_cursor_visible(true);
-
-                    debug!("Icon: {}", icon_name.name());
-
-                    let winit_icon = match icon_name.name() {
-                        "default" | "left_ptr" => CursorIcon::Default,
-                        "pointer" | "hand2" => CursorIcon::Pointer,
-                        "text" | "xterm" => CursorIcon::Text,
-                        "grab" => CursorIcon::Grab,
-                        "grabbing" => CursorIcon::Grabbing,
-                        "help" => CursorIcon::Help,
-                        "progress" => CursorIcon::Progress,
-                        "wait" => CursorIcon::Wait,
-                        "crosshair" => CursorIcon::Crosshair,
-                        "not-allowed" => CursorIcon::NotAllowed,
-                        "n-resize" => CursorIcon::NResize,
-                        "s-resize" => CursorIcon::SResize,
-                        "e-resize" => CursorIcon::EResize,
-                        "w-resize" => CursorIcon::WResize,
-                        _ => CursorIcon::Default,
-                    };
-                    window.set_cursor(winit_icon);
+        if let Some(window) = &self.window {
+            match event {
+                UserEvent::FullscreenRequest(fullscreen) => {
+                    window.set_fullscreen(if fullscreen {
+                        Some(Fullscreen::Borderless(None))
+                    } else {
+                        None
+                    });
                 }
-                CursorImageStatus::Hidden => {
-                    debug!("Hiding icon");
-                    window.set_cursor_visible(false);
+                UserEvent::FrameReady(cursor) => {
+                    match cursor {
+                        CursorImageStatus::Named(icon_name) => {
+                            window.set_cursor_visible(true);
+
+                            debug!("Icon: {}", icon_name.name());
+
+                            let winit_icon = match icon_name.name() {
+                                "default" | "left_ptr" => CursorIcon::Default,
+                                "pointer" | "hand2" => CursorIcon::Pointer,
+                                "text" | "xterm" => CursorIcon::Text,
+                                "grab" => CursorIcon::Grab,
+                                "grabbing" => CursorIcon::Grabbing,
+                                "help" => CursorIcon::Help,
+                                "progress" => CursorIcon::Progress,
+                                "wait" => CursorIcon::Wait,
+                                "crosshair" => CursorIcon::Crosshair,
+                                "not-allowed" => CursorIcon::NotAllowed,
+                                "n-resize" => CursorIcon::NResize,
+                                "s-resize" => CursorIcon::SResize,
+                                "e-resize" => CursorIcon::EResize,
+                                "w-resize" => CursorIcon::WResize,
+                                _ => CursorIcon::Default,
+                            };
+                            window.set_cursor(winit_icon);
+                        }
+                        CursorImageStatus::Hidden => {
+                            debug!("Hiding icon");
+                            window.set_cursor_visible(false);
+                        }
+                        CursorImageStatus::Surface(_) => {}
+                    }
+
+                    trace!("Redraw requested");
+                    window.request_redraw();
                 }
-                CursorImageStatus::Surface(_) => {}
             }
-
-            trace!("Redraw requested");
-            window.request_redraw();
         }
     }
 

@@ -1,9 +1,15 @@
-use std::sync::Mutex;
+use std::sync::{Mutex, Arc};
 
 pub struct FrameBuffer {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u32>,
+}
+
+impl Default for FrameBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FrameBuffer {
@@ -16,4 +22,4 @@ impl FrameBuffer {
     }
 }
 
-pub type SharedFrame = std::sync::Arc<Mutex<FrameBuffer>>;
+pub type SharedFrame = Arc<Mutex<FrameBuffer>>;

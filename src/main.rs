@@ -7,20 +7,28 @@ use crate::{
 use smithay::{
     input::{SeatState, keyboard::XkbConfig, pointer::CursorImageStatus},
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
-    reexports::wayland_server::{Display, ListeningSocket, protocol::wl_shm::Format},
+    reexports::{
+        calloop::EventLoop as CalloopLoop,
+        wayland_server::{Display, ListeningSocket, protocol::wl_shm::Format},
+    },
     utils::Transform,
     wayland::{
         compositor::{CompositorClientState, CompositorState},
         selection::data_device::DataDeviceState,
-        shell::xdg::XdgShellState,
+        shell::xdg::{XdgShellState, decoration::XdgDecorationState},
         shm::ShmState,
+        text_input::TextInputManagerState,
+        viewporter::ViewporterState,
+        xwayland_shell::XWaylandShellState,
     },
+    xwayland::{X11Wm, XWayland, XWaylandEvent},
 };
 use std::{
-    process::Command,
+    collections::HashMap,
+    process::{Command, Stdio},
     sync::{Arc, Mutex, mpsc},
 };
-use tracing::{Level, debug, error, info};
+use tracing::{Level, debug, error, info, warn};
 use winit::event_loop::EventLoop;
 
 pub mod framebuffer;
@@ -48,7 +56,7 @@ pub enum Verbosity {
 
 fn help() {
     println!();
-    println!("{HEADER}Usage:{ENDC} flybrain [options]");
+    println!("{HEADER}Usage:{ENDC} render-thing [options]");
     println!();
     println!("{HEADER}Options:");
     println!(" {GREEN}-width <width>{ENDC}   Set the width of the output (default: 1280)");
@@ -100,29 +108,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
-    let width = if let Some(width) = left.iter().position(|arg| arg == "-width") {
-        let (_, args) = left.split_at(width + 1);
+    let width = if let Some(width) = args.iter().position(|arg| arg == "-width") {
+        let (_, args) = args.split_at(width + 1);
         args[0].parse::<i32>().unwrap_or(1024)
     } else {
         1280
     };
 
-    let height = if let Some(height) = left.iter().position(|arg| arg == "-height") {
-        let (_, args) = left.split_at(height + 1);
+    let height = if let Some(height) = args.iter().position(|arg| arg == "-height") {
+        let (_, args) = args.split_at(height + 1);
         args[0].parse::<i32>().unwrap_or(1024)
     } else {
         720
     };
 
-    let hz = if let Some(hz) = left.iter().position(|arg| arg == "-hz") {
-        let (_, args) = left.split_at(hz + 1);
+    let hz = if let Some(hz) = args.iter().position(|arg| arg == "-hz") {
+        let (_, args) = args.split_at(hz + 1);
         args[0].parse::<i32>().unwrap_or(60)
     } else {
         60
     };
 
-    let window = if let Some(window) = left.iter().position(|arg| arg == "-window") {
-        let (_, args) = left.split_at(window + 1);
+    let window = if let Some(window) = args.iter().position(|arg| arg == "-window") {
+        let (_, args) = args.split_at(window + 1);
         let mut window = args[0].clone();
         if window.starts_with("\"") {
             window = window.strip_prefix("\"").unwrap().to_string();
@@ -146,10 +154,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     debug!("hz: {}", hz);
 
     let mut display: Display<State> = Display::new()?;
+    let display_handle = display.handle();
 
     let compositor_state = CompositorState::new::<State>(&display.handle());
 
     let xdg_shell_state = XdgShellState::new::<State>(&display.handle());
+    let xdg_decoration_state = XdgDecorationState::new::<State>(&display.handle());
 
     let mut seat_state = SeatState::new();
 
@@ -164,18 +174,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let shared_frame: SharedFrame = Arc::new(Mutex::new(FrameBuffer::new()));
+    let viewporter_state = ViewporterState::new::<State>(&display.handle());
+    let text_input_state = TextInputManagerState::new::<State>(&display.handle());
+
+    let xwayland_shell_state = XWaylandShellState::new::<State>(&display.handle());
 
     let mut state = State {
         compositor_state,
         xdg_shell_state,
+        xdg_decoration_state,
         seat_state,
-        seat: seat,
+        seat,
         shm_state,
         data_device_state,
+        viewporter_state,
+        text_input_state,
+
+        xwayland_shell_state,
+        xwms: HashMap::new(),
 
         windows: Vec::new(),
+        x11_windows: Vec::new(),
+        active_surface: None,
         cursor: CursorImageStatus::default_named(),
-
         shared_frame: shared_frame.clone(),
         proxy,
     };
@@ -193,6 +214,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             subpixel: Subpixel::Unknown,
             make: "render-thing".into(),
             model: "Virtual Display".into(),
+            serial_number: "".into(),
         },
     );
 
@@ -215,10 +237,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Created output");
 
+    let (display_tx, display_rx) = mpsc::channel::<Option<u32>>();
+
     std::thread::Builder::new()
         .name("launcher".to_string())
-        .spawn(|| {
-            launch_app(cmd).map_or_else(
+        .spawn(move || {
+            launch_app(cmd, display_rx).map_or_else(
                 |e| {
                     error!(e);
                     std::process::exit(1)
@@ -231,46 +255,103 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (input_tx, input_rx) = mpsc::channel::<InputEvent>();
 
+    let wayland_core_engine_display_handle = display_handle.clone();
     std::thread::Builder::new()
-        .name("client_listener".to_string())
+        .name("wayland_core_engine".to_string())
         .spawn(move || {
+            let mut event_loop: CalloopLoop<State> =
+                CalloopLoop::try_new().expect("Failed to create calloop event loop");
+            let loop_handle = event_loop.handle();
+
+            match XWayland::spawn(
+                &wayland_core_engine_display_handle,
+                None,
+                [("XWAYLAND_NO_GLAMOR", "1")],
+                std::iter::empty::<&str>(),
+                false,
+                Stdio::inherit(),
+                Stdio::inherit(),
+                |_| {},
+            ) {
+                Ok((xwayland, client)) => {
+                    let wm_handle = loop_handle.clone();
+                    let display_tx_err = display_tx.clone();
+                    loop_handle
+                        .insert_source(xwayland, move |event, _, state| match event {
+                            XWaylandEvent::Ready {
+                                x11_socket,
+                                display_number,
+                            } => {
+                                match X11Wm::start_wm(
+                                    wm_handle.clone(),
+                                    &wayland_core_engine_display_handle,
+                                    x11_socket,
+                                    client.clone(),
+                                ) {
+                                    Ok(wm) => {
+                                        info!("XWayland ready on DISPLAY=:{}", display_number);
+                                        state.xwms.insert(wm.id(), wm);
+                                        let _ = display_tx.send(Some(display_number));
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to start X11 WM: {}", e);
+                                        let _ = display_tx.send(None);
+                                    }
+                                }
+                            }
+                            XWaylandEvent::Error => {
+                                error!("XWayland failed to start");
+                                let _ = display_tx_err.send(None);
+                            }
+                        })
+                        .expect("Failed to insert XWayland event source");
+                }
+                Err(e) => {
+                    error!("Failed to spawn XWayland: {}", e);
+                    let _ = display_tx.send(None);
+                }
+            }
+
             loop {
                 while let Ok(event) = input_rx.try_recv() {
                     state.process_input_event(event);
                 }
 
-                if let Ok(Some(stream)) = socket.accept().map_err(|e| {
-                    error!("{}", e);
-                    std::process::exit(1);
-                }) {
-                    info!("New client");
-
-                    display
-                        .handle()
-                        .insert_client(
-                            stream,
-                            Arc::new(ClientState {
-                                compositor_state: CompositorClientState::default(),
-                            }),
-                        )
-                        .map_err(|e| {
-                            error!("{}", e);
-                            std::process::exit(1);
-                        });
+                match socket.accept() {
+                    Ok(Some(stream)) => {
+                        info!("New client connecting...");
+                        let _ = display
+                            .handle()
+                            .insert_client(
+                                stream,
+                                Arc::new(ClientState {
+                                    compositor_state: CompositorClientState::default(),
+                                }),
+                            )
+                            .map_err(|e| error!("Failed to insert client: {}", e));
+                    }
+                    Ok(None) => {}
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(e) => error!("Socket error: {}", e),
                 }
 
-                display.dispatch_clients(&mut state).map_err(|e| {
-                    error!("{}", e);
-                    std::process::exit(1);
-                });
-                display.flush_clients().map_err(|e| {
-                    error!("{}", e);
-                    std::process::exit(1);
-                });
+                let _ = display
+                    .flush_clients()
+                    .map_err(|e| error!("Flush error: {}", e));
+
+                let _ = display
+                    .dispatch_clients(&mut state)
+                    .map_err(|e| error!("Dispatch error: {}", e));
+
+                if let Err(e) =
+                    event_loop.dispatch(Some(std::time::Duration::from_millis(1)), &mut state)
+                {
+                    error!("calloop dispatch error: {}", e);
+                }
             }
         })?;
 
-    info!("Created client_listener thread");
+    info!("Created wayland_core_engine thread");
 
     let mut app = App::new(shared_frame, input_tx);
     event_loop.run_app(&mut app)?;
@@ -278,7 +359,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn launch_app(cmd: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
+fn launch_app(
+    cmd: Vec<String>,
+    display_rx: mpsc::Receiver<Option<u32>>,
+) -> Result<i32, Box<dyn std::error::Error>> {
     if cmd.is_empty() {
         return Err("no command specified".into());
     }
@@ -313,10 +397,26 @@ fn launch_app(cmd: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
         command.env("XDG_RUNTIME_DIR", &host_runtime);
         command.env(
             "PRESSURE_VESSEL_FILESYSTEMS_RW",
-            &format!("{}/render-thing", host_runtime),
+            format!("{}/render-thing", host_runtime),
         );
     }
     command.env("WAYLAND_DISPLAY", "render-thing");
+
+    match display_rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(Some(n)) => {
+            command.env("DISPLAY", format!(":{n}"));
+        }
+        _ => {
+            warn!("XWayland not available; launching without DISPLAY");
+            command.env_remove("DISPLAY");
+        }
+    }
+
+    let display_env = command
+        .get_envs()
+        .find(|(k, _)| k.to_str() == Some("DISPLAY"))
+        .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+    info!("Launching {} with DISPLAY={:?}", executable, display_env);
 
     if *VERBOSITY.lock().unwrap() == Verbosity::VeryVerbose {
         command.env("WAYLAND_DEBUG", "1");
@@ -324,6 +424,7 @@ fn launch_app(cmd: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
     }
 
     info!("Launching {}", executable);
+    debug!("Full command: {:?}", command);
     let status = command.status()?;
     info!("Executable finished");
 

@@ -25,6 +25,7 @@ pub enum InputEvent {
     Resize {
         height: u32,
         width: u32,
+        time: u32,
     },
     CloseRequest,
 }

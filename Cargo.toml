@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-smithay = { git = "https://github.com/Smithay/smithay.git", rev = "023b78b", default-features = false, features = ["wayland_frontend", "xwayland"] }
+smithay = { git = "https://github.com/Smithay/smithay.git", rev = "24647fc", default-features = false, features = ["wayland_frontend", "xwayland"] }
 tracing-subscriber = "0.3"
 tracing = "0.1.44"
 winit = { version = "0.30.13", default-features = false, features = ["wayland", "rwh_06"] }
 softbuffer = "0.4"
+shared_memory = "0.12.4"

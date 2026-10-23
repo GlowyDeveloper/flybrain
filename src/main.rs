@@ -33,6 +33,8 @@ use winit::event_loop::EventLoop;
 
 pub mod framebuffer;
 pub mod input;
+pub mod memory_bridge;
+pub mod python;
 pub mod state;
 pub mod window;
 
@@ -56,7 +58,7 @@ pub enum Verbosity {
 
 fn help() {
     println!();
-    println!("{HEADER}Usage:{ENDC} render-thing [options]");
+    println!("{HEADER}Usage:{ENDC} flybrain [options]");
     println!();
     println!("{HEADER}Options:");
     println!(" {GREEN}-width <width>{ENDC}   Set the width of the output (default: 1280)");
@@ -107,6 +109,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
+    *PYTHON.lock().unwrap() = python::get_python();
+    python::install_pip_dependencies()?;
+    python::install_synapses()?;
 
     let width = if let Some(width) = args.iter().position(|arg| arg == "-width") {
         let (_, args) = args.split_at(width + 1);
@@ -203,16 +209,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Created seat");
 
-    let socket = ListeningSocket::bind("render-thing")?;
+    let socket = ListeningSocket::bind("flybrain")?;
 
-    info!("Listening on WAYLAND_DISPLAY=render-thing");
+    info!("Listening on WAYLAND_DISPLAY=flybrain");
 
     let output = Output::new(
-        "RenderThing".to_string(),
+        "flybrain".to_string(),
         PhysicalProperties {
             size: (200, 150).into(),
             subpixel: Subpixel::Unknown,
-            make: "render-thing".into(),
+            make: "flybrain".into(),
             model: "Virtual Display".into(),
             serial_number: "".into(),
         },
@@ -253,7 +259,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Created launcher thread");
 
+    python::run_main_python().map_or_else(
+        |e| {
+            error!(e);
+            std::process::exit(1)
+        },
+        |_| {},
+    );
+
     let (input_tx, input_rx) = mpsc::channel::<InputEvent>();
+
+    crate::memory_bridge::init_ipc_worker(input_tx.clone());
 
     let wayland_core_engine_display_handle = display_handle.clone();
     std::thread::Builder::new()
@@ -397,10 +413,10 @@ fn launch_app(
         command.env("XDG_RUNTIME_DIR", &host_runtime);
         command.env(
             "PRESSURE_VESSEL_FILESYSTEMS_RW",
-            format!("{}/render-thing", host_runtime),
+            format!("{}/flybrain", host_runtime),
         );
     }
-    command.env("WAYLAND_DISPLAY", "render-thing");
+    command.env("WAYLAND_DISPLAY", "flybrain");
 
     match display_rx.recv_timeout(std::time::Duration::from_secs(10)) {
         Ok(Some(n)) => {

@@ -903,6 +903,14 @@ impl CompositorHandler for State {
                         frame.pixels[y * width as usize + x] = (r << 16) | (g << 8) | b;
                     }
                 }
+
+                if let Some(tx) = crate::memory_bridge::IPC_TX.get() {
+                    let _ = tx.send(crate::memory_bridge::PendingFrame {
+                        pixels: frame.pixels.clone(),
+                        width: frame.width,
+                        height: frame.height,
+                    });
+                }
             }) {
                 Ok(()) => {
                     CAPTURED.fetch_add(1, Ordering::Relaxed);

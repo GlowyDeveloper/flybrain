@@ -1,5 +1,8 @@
 use crate::{ENDC, HEADER, HEIGHT, PYTHON, VERBOSITY, Verbosity, WIDTH};
-use std::{process::{Command, Stdio}, io::Write};
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 use tracing::{debug, warn};
 
 const FLYBRAIN_DOWNLOAD: &str = include_str!("../python/download.py");
@@ -108,8 +111,7 @@ pub fn install_synapses() -> std::io::Result<()> {
     let status = child.wait()?;
 
     if !status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        return Err(std::io::Error::other(
             "Python script failed to execute successfully",
         ));
     }
@@ -119,18 +121,23 @@ pub fn install_synapses() -> std::io::Result<()> {
 }
 
 pub fn run_main_python() -> Result<(), Box<dyn std::error::Error>> {
-    let lane_1 = *HEIGHT.lock().unwrap() * *WIDTH.lock().unwrap() * 4;
-    let lane_2 = 1;
+    let width = *WIDTH.lock().unwrap();
+    let height = *HEIGHT.lock().unwrap();
+
+    let mut dir = std::env::current_exe().unwrap();
+    dir.pop();
+    dir.push(".flybrain/brain");
 
     std::thread::Builder::new()
         .name("python".to_string())
         .spawn(move || {
             let mut child = match Command::new(*PYTHON.lock().unwrap())
                 .arg("-")
-                .arg(lane_1.to_string())
-                .arg(lane_2.to_string())
+                .arg(width.to_string())
+                .arg(height.to_string())
+                .arg(dir.to_str().unwrap())
                 .stdin(Stdio::piped())
-                .spawn() 
+                .spawn()
             {
                 Ok(c) => c,
                 Err(_) => return,

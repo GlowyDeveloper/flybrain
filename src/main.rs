@@ -1,6 +1,7 @@
 use crate::{
     framebuffer::{FrameBuffer, SharedFrame},
     input::InputEvent,
+    memory_bridge::init_ipc_worker,
     state::{ClientState, State},
     window::{App, UserEvent},
 };
@@ -47,6 +48,7 @@ pub static VERBOSITY: Mutex<Verbosity> = Mutex::new(Verbosity::Normal);
 pub static WIDTH: Mutex<i32> = Mutex::new(1280);
 pub static HEIGHT: Mutex<i32> = Mutex::new(720);
 pub static HZ: Mutex<i32> = Mutex::new(60);
+pub static FULLSCREEN: Mutex<bool> = Mutex::new(false);
 pub static WINDOW: Mutex<Option<String>> = Mutex::new(None);
 
 #[derive(Debug, Clone, PartialEq, Copy)]
@@ -64,9 +66,10 @@ fn help() {
     println!(" {GREEN}-width <width>{ENDC}   Set the width of the output (default: 1280)");
     println!(" {GREEN}-height <height>{ENDC} Set the height of the output (default: 720)");
     println!(" {GREEN}-hz <hz>{ENDC}         Set the refresh rate of the output (default: 60)");
+    println!(" {GREEN}-window <window>{ENDC} Only display the output in the specified window");
+    println!(" {GREEN}-fullscreen{ENDC}      Forces the window to be fullscreened at all times");
     println!(" {GREEN}-v{ENDC}               Launch the application in verbose mode");
     println!(" {GREEN}-vv{ENDC}              Launch the application in very verbose mode");
-    println!(" {GREEN}-window <window>{ENDC} Only display the output in the specified window");
     println!(" {GREEN}--{ENDC}               Used to launch the application");
 }
 
@@ -96,6 +99,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         *VERBOSITY.lock().unwrap() = Verbosity::VeryVerbose;
     } else if left.contains(&"-v".to_string()) {
         *VERBOSITY.lock().unwrap() = Verbosity::Verbose;
+    }
+
+    if left.contains(&"-fullscreen".to_string()) {
+        *FULLSCREEN.lock().unwrap() = true;
     }
 
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
@@ -269,7 +276,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (input_tx, input_rx) = mpsc::channel::<InputEvent>();
 
-    crate::memory_bridge::init_ipc_worker(input_tx.clone());
+    init_ipc_worker(input_tx.clone());
 
     let wayland_core_engine_display_handle = display_handle.clone();
     std::thread::Builder::new()

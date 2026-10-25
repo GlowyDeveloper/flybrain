@@ -1,11 +1,20 @@
-use crate::{HEIGHT, WIDTH, framebuffer::SharedFrame, input::InputEvent, window::UserEvent};
+use crate::{
+    HEIGHT, WIDTH, WINDOW,
+    framebuffer::SharedFrame,
+    input::InputEvent,
+    memory_bridge::{IPC_TX, IpcMessage, PendingFrame},
+    window::UserEvent,
+};
 use smithay::{
-    backend::input::{Axis, ButtonState, InputTime, KeyState}, delegate_dispatch2, input::{
+    backend::input::{Axis, ButtonState, InputTime, KeyState},
+    delegate_dispatch2,
+    input::{
         Seat, SeatHandler, SeatState,
         dnd::DndGrabHandler,
         keyboard::{FilterResult, KeyboardTarget, KeysymHandle, ModifiersState},
         pointer::{AxisFrame, ButtonEvent, CursorImageStatus, MotionEvent},
-    }, reexports::{
+    },
+    reexports::{
         wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode,
         wayland_server::{
             Client, Resource,
@@ -14,7 +23,9 @@ use smithay::{
                 wl_buffer::WlBuffer, wl_output::WlOutput, wl_seat::WlSeat, wl_surface::WlSurface,
             },
         },
-    }, utils::{IsAlive, Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Size}, wayland::{
+    },
+    utils::{IsAlive, Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Size},
+    wayland::{
         buffer::BufferHandler,
         compositor::{
             BufferAssignment, CompositorClientState, CompositorHandler, CompositorState,
@@ -36,7 +47,8 @@ use smithay::{
         text_input::{TextInputActivation, TextInputManagerState},
         viewporter::ViewporterState,
         xwayland_shell::{XWaylandShellHandler, XWaylandShellState},
-    }, xwayland::{
+    },
+    xwayland::{
         X11Surface, X11Wm, XWaylandClientData, XwmHandler,
         xwm::{Reorder, ResizeEdge, XwmId},
     },
@@ -52,7 +64,6 @@ use std::{
 };
 use tracing::{info, trace, warn};
 use winit::event_loop::EventLoopProxy;
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FocusMode {
@@ -137,7 +148,9 @@ impl KeyboardTarget<State> for KeyboardFocusTarget {
     ) {
         match self {
             KeyboardFocusTarget::Wl(s) => KeyboardTarget::enter(s, seat, data, keys, serial),
-            KeyboardFocusTarget::X11(s) => KeyboardTarget::enter(s.as_ref(), seat, data, keys, serial),
+            KeyboardFocusTarget::X11(s) => {
+                KeyboardTarget::enter(s.as_ref(), seat, data, keys, serial)
+            }
         }
     }
 
@@ -381,14 +394,15 @@ impl State {
     }
 
     fn focus_surface(&mut self, surface: Option<WlSurface>) {
-        if tunables().focus == FocusMode::Off && let Some(s) = surface.as_ref()
-                && self
-                    .x11_windows
-                    .iter()
-                    .any(|w| w.wl_surface().as_ref() == Some(s))
-                {
-                    return;
-                }
+        if tunables().focus == FocusMode::Off
+            && let Some(s) = surface.as_ref()
+            && self
+                .x11_windows
+                .iter()
+                .any(|w| w.wl_surface().as_ref() == Some(s))
+        {
+            return;
+        }
         let target = surface.as_ref().map(|s| self.focus_target_for(s));
         if let Some(keyboard) = self.seat.get_keyboard() {
             let serial = SERIAL_COUNTER.next_serial();
@@ -418,7 +432,7 @@ impl State {
     }
 
     fn is_target_x11(&self, surface: &X11Surface) -> bool {
-        match crate::WINDOW.lock().unwrap().as_ref() {
+        match WINDOW.lock().unwrap().as_ref() {
             Some(target) => surface.title() == target.as_str(),
             None => true,
         }
@@ -783,26 +797,16 @@ impl XwmHandler for State {
         );
     }
 
-    fn fullscreen_request(&mut self, _id: XwmId, window: X11Surface) {
-        let (w, h) = (*WIDTH.lock().unwrap(), *HEIGHT.lock().unwrap());
-        info!(
-            "fullscreen_request for {} ({:?}) -> {}x{}",
-            window.window_id(),
-            window.title(),
-            w,
-            h
-        );
-        let _ = window.set_fullscreen(true);
-        let _ = window.configure(Rectangle::new(Point::new(0, 0), Size::new(w, h)));
+    fn fullscreen_request(&mut self, _id: XwmId, _window: X11Surface) {
+        self.proxy
+            .send_event(UserEvent::FullscreenRequest(true))
+            .ok();
     }
 
-    fn unfullscreen_request(&mut self, _id: XwmId, window: X11Surface) {
-        info!(
-            "unfullscreen_request for {} ({:?})",
-            window.window_id(),
-            window.title()
-        );
-        let _ = window.set_fullscreen(false);
+    fn unfullscreen_request(&mut self, _id: XwmId, _window: X11Surface) {
+        self.proxy
+            .send_event(UserEvent::FullscreenRequest(false))
+            .ok();
     }
 }
 
@@ -833,7 +837,7 @@ impl CompositorHandler for State {
 
         let is_active = self.active_surface.as_ref() == Some(&root);
 
-        let capture = match crate::WINDOW.lock().unwrap().as_ref() {
+        let capture = match WINDOW.lock().unwrap().as_ref() {
             Some(window_name) => self.x11_windows.iter().any(|window| {
                 window.wl_surface().as_ref() == Some(&root) && &window.title() == window_name
             }),
@@ -904,12 +908,12 @@ impl CompositorHandler for State {
                     }
                 }
 
-                if let Some(tx) = crate::memory_bridge::IPC_TX.get() {
-                    let _ = tx.send(crate::memory_bridge::PendingFrame {
+                if let Some(tx) = IPC_TX.get() {
+                    let _ = tx.send(IpcMessage::Frame(PendingFrame {
                         pixels: frame.pixels.clone(),
                         width: frame.width,
                         height: frame.height,
-                    });
+                    }));
                 }
             }) {
                 Ok(()) => {

@@ -1,7 +1,8 @@
 use crate::{
-    HEIGHT, WIDTH,
+    FULLSCREEN, HEIGHT, WIDTH,
     framebuffer::SharedFrame,
     input::{InputEvent, linux_keycode, linux_mouse_button},
+    memory_bridge::{TrainerSignal, send_trainer_signal},
 };
 use smithay::input::pointer::CursorImageStatus;
 use softbuffer::{Context, Surface};
@@ -12,7 +13,7 @@ use winit::{
     dpi::{LogicalSize, Size},
     event::{ElementState, MouseScrollDelta, WindowEvent},
     event_loop::ActiveEventLoop,
-    keyboard::PhysicalKey,
+    keyboard::{KeyCode, PhysicalKey},
     window::{CursorIcon, Fullscreen, Window, WindowAttributes, WindowId},
 };
 
@@ -58,13 +59,18 @@ impl ApplicationHandler<UserEvent> for App {
             *WIDTH.lock().unwrap() as f64,
             *HEIGHT.lock().unwrap() as f64,
         ));
-        let attr = WindowAttributes::default()
+        let mut attr = WindowAttributes::default()
             .with_decorations(false)
             .with_resizable(true)
             .with_inner_size(size)
             .with_min_inner_size(size);
 
+        if *FULLSCREEN.lock().unwrap() {
+            attr = attr.with_fullscreen(Some(Fullscreen::Borderless(None)));
+        }
+
         let window = Rc::new(event_loop.create_window(attr).unwrap());
+
         let context = Context::new(window.clone()).unwrap();
         let surface = Surface::new(&context, window.clone()).unwrap();
         self.window = Some(window.clone());
@@ -97,12 +103,27 @@ impl ApplicationHandler<UserEvent> for App {
                 if event.repeat {
                     return;
                 }
-                if let PhysicalKey::Code(code) = event.physical_key && let Some(keycode) = linux_keycode(code) {
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    if event.state == ElementState::Pressed {
+                        match code {
+                            KeyCode::F9 => {
+                                send_trainer_signal(TrainerSignal::Reward);
+                                return;
+                            }
+                            KeyCode::F10 => {
+                                send_trainer_signal(TrainerSignal::Loss);
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(keycode) = linux_keycode(code) {
                         let _ = self.input_tx.send(InputEvent::Keyboard {
                             keycode,
                             pressed: event.state == ElementState::Pressed,
                             time: self.now(),
                         });
+                    }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -156,7 +177,9 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         if let Some(window) = &self.window {
             match event {
-                UserEvent::FullscreenRequest(fullscreen) => {
+                UserEvent::FullscreenRequest(fullscreen)
+                    if !*FULLSCREEN.lock().unwrap() =>
+                {
                     window.set_fullscreen(if fullscreen {
                         Some(Fullscreen::Borderless(None))
                     } else {
@@ -199,6 +222,7 @@ impl ApplicationHandler<UserEvent> for App {
                     trace!("Redraw requested");
                     window.request_redraw();
                 }
+                _ => {}
             }
         }
     }

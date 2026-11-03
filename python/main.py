@@ -1,22 +1,32 @@
 import sys
 import time
 import pathlib
+import tomllib
 from multiprocessing import shared_memory
 import numpy as np
 from flybrain import FlyBrain
 
-if len(sys.argv) < 4:
-    sys.exit(1)
+SHM_NAME = "flybrain_ipc_buffer"
+FLYBRAIN_FOLDER = pathlib.Path(sys.argv[1])
 
-WIDTH, HEIGHT = int(sys.argv[1]), int(sys.argv[2])
-BRAIN_DIR = sys.argv[3]
-BYTES_PER_PIXEL = 3
+with open(FLYBRAIN_FOLDER / "current.toml", "rb") as f:
+    current = tomllib.load(f)
 
-lane_1 = WIDTH * HEIGHT * BYTES_PER_PIXEL
-lane_2 = 1
+with open(FLYBRAIN_FOLDER / "env.toml", "rb") as f:
+    env = tomllib.load(f)
+
+lane_1 = env["shared"]["lane_1"]
+if lane_1 == "default":
+    lane_1 = int(current["options"]["width"]) * int(current["options"]["height"]) * 3
+else:
+    lane_1 = int(lane_1)
+
+lane_2 = int(env["shared"]["lane_2"])
+width = int(current["options"]["width"])
+height = int(current["options"]["height"])
 control_size = 64
 total = lane_1 + lane_2 + control_size
-SHM_NAME = "flybrain_ipc_buffer"
+brain_dir = FLYBRAIN_FOLDER / "brain"
 
 try:
     zombie = shared_memory.SharedMemory(name=SHM_NAME)
@@ -32,12 +42,12 @@ rust_to_py_buf = shm.buf[control_block_offset : control_block_offset + 1]
 control_flags  = shm.buf[control_block_offset + 8  : control_block_offset + 24]
 trainer_flags  = shm.buf[control_block_offset + 24 : control_block_offset + 40]
 
-rx_frame = np.ndarray((HEIGHT, WIDTH, BYTES_PER_PIXEL), dtype=np.uint8, buffer=py_to_rust_buf)
+rx_frame = np.ndarray((height, width, 3), dtype=np.uint8, buffer=py_to_rust_buf)
 tx_byte = np.ndarray((1,), dtype=np.uint8, buffer=rust_to_py_buf)
 sync_markers = np.ndarray((2,), dtype=np.int64, buffer=control_flags)
 trainer_markers = np.ndarray((2,), dtype=np.int64, buffer=trainer_flags)
 
-brain = FlyBrain(data=BRAIN_DIR, device="auto")
+brain = FlyBrain(data=brain_dir, device="auto")
 
 loom_detectors = brain.cells(["LC4", "LPLC2"])
 escape_neurons = brain.cells(["DNp01"])
@@ -47,10 +57,7 @@ N_FEATURES = len(TRACKED) + 1
 
 JUMP_PRESS, JUMP_RELEASE = 0x20, 0x21
 
-X0, X1 = int(WIDTH * 0.35), int(WIDTH * 0.55)
-Y0, Y1 = int(HEIGHT * 0.2), int(HEIGHT * 0.9)
-
-WEIGHTS_PATH = pathlib.Path(BRAIN_DIR).parent / "policy.npz"
+WEIGHTS_PATH = pathlib.Path(brain_dir).parent / "policy.npz"
 LEARNING_RATE = 0.05
 TRACE_DECAY = 0.9
 
@@ -92,7 +99,7 @@ try:
         if current_rust_frame > last_seen_frame:
             last_seen_frame = current_rust_frame
 
-            strip = rx_frame[Y0:Y1, X0:X1].astype(np.float32)
+            strip = rx_frame[0:height, 0:width].astype(np.float32)
             delta = 0.0 if prev_strip is None else np.abs(strip - prev_strip).mean() / 255.0
             prev_strip = strip
 

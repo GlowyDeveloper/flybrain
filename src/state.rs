@@ -1,5 +1,5 @@
 use crate::{
-    HEIGHT, WIDTH, WINDOW,
+    SAVE,
     framebuffer::SharedFrame,
     input::InputEvent,
     memory_bridge::{IPC_TX, IpcMessage, PendingFrame},
@@ -432,7 +432,8 @@ impl State {
     }
 
     fn is_target_x11(&self, surface: &X11Surface) -> bool {
-        match WINDOW.lock().unwrap().as_ref() {
+        let save = SAVE.lock().unwrap();
+        match save.options.window.clone() {
             Some(target) => surface.title() == target.as_str(),
             None => true,
         }
@@ -453,7 +454,8 @@ impl State {
                 || self.active_surface.is_none();
         }
         let geo = surface.geometry();
-        let (w, h) = (*WIDTH.lock().unwrap(), *HEIGHT.lock().unwrap());
+        let save = SAVE.lock().unwrap();
+        let (w, h) = (save.options.width, save.options.height);
         geo.size.w * 10 >= w * 9 && geo.size.h * 10 >= h * 9
     }
 
@@ -837,9 +839,10 @@ impl CompositorHandler for State {
 
         let is_active = self.active_surface.as_ref() == Some(&root);
 
-        let capture = match WINDOW.lock().unwrap().as_ref() {
+        let save = SAVE.lock().unwrap();
+        let capture = match save.options.window.clone() {
             Some(window_name) => self.x11_windows.iter().any(|window| {
-                window.wl_surface().as_ref() == Some(&root) && &window.title() == window_name
+                window.wl_surface().as_ref() == Some(&root) && window.title() == window_name
             }),
             None => match tunables().capture {
                 CaptureMode::Any => true,

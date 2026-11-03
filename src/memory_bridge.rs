@@ -1,4 +1,4 @@
-use crate::{HEIGHT, WIDTH, input::InputEvent};
+use crate::{SAVE, input::InputEvent};
 use shared_memory::ShmemConf;
 use std::{
     sync::{
@@ -65,7 +65,8 @@ pub fn init_ipc_worker(input_tx: Sender<InputEvent>) {
             let mut local_counter: i64 = 0;
             let mut trainer_seq: i64 = 0;
 
-            let lane_1_size = (*WIDTH.lock().unwrap() * *HEIGHT.lock().unwrap() * 3) as usize;
+            let save = SAVE.lock().unwrap();
+            let lane_1_size = (save.options.width * save.options.height * 3) as usize;
             let control_block_offset = (lane_1_size + 7) & !7;
 
             if control_block_offset + std::mem::size_of::<SharedControlBlock>() > shmem.len() {

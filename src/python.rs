@@ -1,4 +1,4 @@
-use crate::{ENDC, HEADER, HEIGHT, PYTHON, VERBOSITY, Verbosity, WIDTH};
+use crate::{ENDC, HEADER, PYTHON, VERBOSITY, Verbosity};
 use std::{
     io::Write,
     process::{Command, Stdio},
@@ -121,20 +121,15 @@ pub fn install_synapses() -> std::io::Result<()> {
 }
 
 pub fn run_main_python() -> Result<(), Box<dyn std::error::Error>> {
-    let width = *WIDTH.lock().unwrap();
-    let height = *HEIGHT.lock().unwrap();
-
     let mut dir = std::env::current_exe().unwrap();
     dir.pop();
-    dir.push(".flybrain/brain");
+    dir.push(".flybrain");
 
     std::thread::Builder::new()
         .name("python".to_string())
         .spawn(move || {
             let mut child = match Command::new(*PYTHON.lock().unwrap())
                 .arg("-")
-                .arg(width.to_string())
-                .arg(height.to_string())
                 .arg(dir.to_str().unwrap())
                 .stdin(Stdio::piped())
                 .spawn()

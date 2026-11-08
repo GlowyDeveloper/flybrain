@@ -53,7 +53,7 @@ pub fn initilize_tomls() {
 
     let saves_children = std::fs::read_dir(saves).unwrap();
     for save in saves_children.flatten() {
-        let file = save.path();
+        let file = save.path().join("save.toml");
         let content = std::fs::read_to_string(&file).unwrap_or_default();
 
         match toml::from_str::<SaveToml>(&content) {
@@ -89,50 +89,44 @@ pub fn get_created(requested: String) -> SaveToml {
         let _ = std::fs::remove_file(root.join("current.toml"));
     }
 
-    let stripped = if requested.ends_with(".toml") {
-        requested.strip_suffix(".toml").unwrap().to_string()
-    } else {
-        requested.clone()
-    };
+    let file = dot_flybrain()
+        .join("saves")
+        .join(requested.clone())
+        .join("save.toml");
 
-    let path = root.join(format!("saves/{}.toml", stripped));
-
-    if !path.exists() {
+    if !file.exists() {
         eprintln!("File \"{}\" does not exist.", requested);
         std::process::exit(1);
     }
-    if path.is_dir() {
+    if file.is_dir() {
         eprintln!("Expected file \"{}\", found folder.", requested);
     }
 
-    let content = std::fs::read_to_string(path.clone()).unwrap_or_default();
+    let content = std::fs::read_to_string(file.clone()).unwrap_or_default();
 
     match toml::from_str::<SaveToml>(&content) {
         Ok(toml) => toml,
         Err(err) => {
-            println!("Failed to deserialize {:#?}", path);
-            info!("{:#?} deserialization error: {}", path, err);
+            println!("Failed to deserialize {:#?}", file);
+            info!("{:#?} deserialization error: {}", file, err);
             let saved = fix_save_toml(&content);
             let str = toml::to_string_pretty(&saved).unwrap();
 
-            info!("Writing to {:#?}", path);
+            info!("Writing to {:#?}", file);
             trace!(str);
-            std::fs::write(&path, str).unwrap();
+            std::fs::write(&file, str).unwrap();
             saved
         }
     }
 }
 
 pub fn update_or_create_save(requested: String, args: Vec<String>) -> Option<SaveToml> {
-    let stripped = if requested.ends_with(".toml") {
-        requested.strip_suffix(".toml").unwrap().to_string()
-    } else {
-        requested.clone()
-    };
-
     let file = dot_flybrain()
         .join("saves")
-        .join(format!("{}.toml", stripped));
+        .join(requested.clone())
+        .join("save.toml");
+
+    std::fs::create_dir(dot_flybrain().join("saves").join(requested)).unwrap();
 
     let toml = if file.exists() {
         let content = std::fs::read_to_string(&file).unwrap_or_default();
@@ -259,4 +253,24 @@ pub fn parse_args(args: Vec<String>, mut toml: SaveToml) -> Option<SaveToml> {
     toml.options = options;
 
     Some(toml)
+}
+
+pub fn write_policy(name: Option<String>) {
+    let current = dot_flybrain().join("current.npz");
+
+    if let Some(name) = name {
+        let file = dot_flybrain()
+            .join("saves")
+            .join(name.clone())
+            .join("policy.npz");
+
+        if file.exists() {
+            std::fs::copy(file, current).unwrap();
+        } else {
+            std::fs::write(&file, "").unwrap();
+            std::fs::write(&current, "").unwrap();
+        }
+    } else {
+        std::fs::write(&current, "").unwrap();
+    }
 }

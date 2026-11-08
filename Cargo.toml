@@ -12,3 +12,4 @@ softbuffer = "0.4"
 shared_memory = "0.12.4"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.8"
+ctrlc = "3"

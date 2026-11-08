@@ -57,14 +57,14 @@ N_FEATURES = len(TRACKED) + 1
 
 JUMP_PRESS, JUMP_RELEASE = 0x20, 0x21
 
-WEIGHTS_PATH = pathlib.Path(brain_dir).parent / "policy.npz"
+WEIGHTS_PATH = pathlib.Path(brain_dir).parent / "current.npz"
 LEARNING_RATE = 0.05
 TRACE_DECAY = 0.9
 
 if WEIGHTS_PATH.exists():
     saved = np.load(WEIGHTS_PATH)
     w, b = saved["w"], float(saved["b"])
-    print(f"Loaded trained policy from {WEIGHTS_PATH}")
+    print("Loaded trained policy")
 else:
     w, b = np.zeros(N_FEATURES, dtype=np.float64), 0.0
 
@@ -132,7 +132,7 @@ try:
             e_b = 0.0
 
             np.savez(WEIGHTS_PATH, w=w, b=b)
-            print(f"{'Rewarded' if reward > 0 else 'Penalized'} — policy saved to {WEIGHTS_PATH}")
+            print(f"{'Rewarded' if reward > 0 else 'Penalized'} — policy saved")
 
         time.sleep(0.001)
 except KeyboardInterrupt:

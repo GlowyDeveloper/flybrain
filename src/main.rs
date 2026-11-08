@@ -48,6 +48,7 @@ pub const ENDC: &str = "\x1b[0m";
 pub static PYTHON: Mutex<&str> = Mutex::new("");
 pub static VERBOSITY: Mutex<Verbosity> = Mutex::new(Verbosity::Normal);
 pub static SAVE: LazyLock<Mutex<SaveToml>> = LazyLock::new(|| Mutex::new(SaveToml::default()));
+pub static NAME: Mutex<String> = Mutex::new(String::new());
 
 #[derive(Debug, Clone, PartialEq, Copy)]
 pub enum Verbosity {
@@ -123,26 +124,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     settings::initilize_tomls();
 
     let toml = if name.starts_with("-") {
-        if let Some(t) = settings::launch_without_save(args) {
+        if let Some(t) = settings::launch_without_save(args.clone()) {
+            settings::write_policy(None);
             t
         } else {
             help();
             return Ok(());
         }
     } else if args.iter().any(|a| a == "--") {
-        if let Some(t) = settings::update_or_create_save(name.clone(), args) {
+        if let Some(t) = settings::update_or_create_save(name.clone(), args.clone()) {
+            settings::write_policy(Some(name.clone()));
             t
         } else {
             help();
             return Ok(());
         }
     } else {
+        settings::write_policy(Some(name.clone()));
         settings::get_created(name.clone())
     };
 
     settings::write_current(&toml);
 
     *SAVE.lock().unwrap() = toml.clone();
+    *NAME.lock().unwrap() = name.clone();
 
     *PYTHON.lock().unwrap() = python::get_python();
     python::install_pip_dependencies()?;
@@ -151,7 +156,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     start(toml)
 }
 
+fn save_policy() {
+    std::fs::copy(
+        settings::dot_flybrain().join("current.npz"),
+        settings::dot_flybrain()
+            .join("saves")
+            .join(NAME.lock().unwrap().clone())
+            .join("policy.npz"),
+    )
+    .unwrap();
+}
+
 fn start(toml: SaveToml) -> Result<(), Box<dyn std::error::Error>> {
+    ctrlc::set_handler(move || {
+        save_policy();
+        std::process::exit(130);
+    })
+    .expect("Error setting Ctrl-C handler");
+
     let mut display: Display<State> = Display::new()?;
     let display_handle = display.handle();
 
@@ -244,9 +266,13 @@ fn start(toml: SaveToml) -> Result<(), Box<dyn std::error::Error>> {
             launch_app(display_rx).map_or_else(
                 |e| {
                     error!(e);
+                    save_policy();
                     std::process::exit(1)
                 },
-                |code| std::process::exit(code),
+                |code| {
+                    save_policy();
+                    std::process::exit(code)
+                },
             );
         })?;
 

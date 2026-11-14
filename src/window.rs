@@ -55,18 +55,22 @@ impl App {
 
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let save = SAVE.lock().unwrap();
-        let size = Size::Logical(LogicalSize::new(
-            save.options.width as f64,
-            save.options.height as f64,
-        ));
+        let (width, height, fullscreen) = {
+            let save = SAVE.lock().unwrap();
+            (
+                save.options.width as f64,
+                save.options.height as f64,
+                save.options.fullscreen,
+            )
+        };
+        let size = Size::Logical(LogicalSize::new(width, height));
         let mut attr = WindowAttributes::default()
             .with_decorations(false)
             .with_resizable(true)
             .with_inner_size(size)
             .with_min_inner_size(size);
 
-        if save.options.fullscreen {
+        if fullscreen {
             attr = attr.with_fullscreen(Some(Fullscreen::Borderless(None)));
         }
 
@@ -177,14 +181,16 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         if let Some(window) = &self.window {
-            let save = SAVE.lock().unwrap();
             match event {
-                UserEvent::FullscreenRequest(fullscreen) if !save.options.fullscreen => {
-                    window.set_fullscreen(if fullscreen {
-                        Some(Fullscreen::Borderless(None))
-                    } else {
-                        None
-                    });
+                UserEvent::FullscreenRequest(fullscreen) => {
+                    let already_fullscreen = SAVE.lock().unwrap().options.fullscreen;
+                    if !already_fullscreen {
+                        window.set_fullscreen(if fullscreen {
+                            Some(Fullscreen::Borderless(None))
+                        } else {
+                            None
+                        });
+                    }
                 }
                 UserEvent::FrameReady(cursor) => {
                     match cursor {
@@ -222,7 +228,6 @@ impl ApplicationHandler<UserEvent> for App {
                     trace!("Redraw requested");
                     window.request_redraw();
                 }
-                _ => {}
             }
         }
     }

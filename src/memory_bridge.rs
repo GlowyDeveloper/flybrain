@@ -1,4 +1,4 @@
-use crate::{SAVE, input::InputEvent};
+use crate::{ENV, SAVE, input::InputEvent};
 use shared_memory::ShmemConf;
 use std::{
     sync::{
@@ -7,7 +7,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub struct PendingFrame {
     pub pixels: Vec<u32>,
@@ -27,13 +27,17 @@ pub enum IpcMessage {
 }
 
 #[repr(C, align(8))]
-struct SharedControlBlock {
-    python_response_byte: u8,
-    _padding: [u8; 7],
+struct SharedControlTail {
     rust_frame_counter: i64,
     python_frame_ack: i64,
     trainer_seq: i64,
     trainer_value: i64,
+}
+
+struct ActionChannel {
+    keycode: u32,
+    pressed_byte: u8,
+    released_byte: u8,
 }
 
 pub static IPC_TX: OnceLock<Sender<IpcMessage>> = OnceLock::new();
@@ -65,17 +69,50 @@ pub fn init_ipc_worker(input_tx: Sender<InputEvent>) {
             let mut local_counter: i64 = 0;
             let mut trainer_seq: i64 = 0;
 
-            let save = SAVE.lock().unwrap();
-            let lane_1_size = (save.options.width * save.options.height * 3) as usize;
-            let control_block_offset = (lane_1_size + 7) & !7;
+            let (lane_1_size, actions) = {
+                let save = SAVE.lock().unwrap();
+                let env = ENV.lock().unwrap();
 
-            if control_block_offset + std::mem::size_of::<SharedControlBlock>() > shmem.len() {
+                let lane_1_size = if env.shared.lane_1 == "default" {
+                    (save.options.width * save.options.height * 3) as usize
+                } else if let Ok(lane_1) = env.shared.lane_1.parse::<usize>() {
+                    lane_1
+                } else {
+                    warn!("Unable to parse lane_1 size to usize");
+                    (save.options.width * save.options.height * 3) as usize
+                };
+
+                let mut action_codes: Vec<u32> = save.inputs.keys().copied().collect();
+                action_codes.sort();
+                let actions: Vec<ActionChannel> = action_codes
+                    .iter()
+                    .map(|code| {
+                        let input = &save.inputs[code];
+                        ActionChannel {
+                            keycode: *code,
+                            pressed_byte: input.pressed,
+                            released_byte: input.released,
+                        }
+                    })
+                    .collect();
+
+                (lane_1_size, actions)
+            };
+
+            let n_actions = actions.len();
+
+            let response_bytes_offset = lane_1_size;
+            let control_block_offset = (response_bytes_offset + n_actions + 7) & !7;
+
+            if control_block_offset + std::mem::size_of::<SharedControlTail>() > shmem.len() {
                 error!("❌ Shared memory segment too small for control block");
                 std::process::exit(1);
             }
 
+            let response_bytes_ptr =
+                unsafe { base_raw_ptr.add(response_bytes_offset) as *const u8 };
             let control_ptr =
-                unsafe { base_raw_ptr.add(control_block_offset) as *mut SharedControlBlock };
+                unsafe { base_raw_ptr.add(control_block_offset) as *mut SharedControlTail };
 
             println!("Asynchronous IPC Worker initialized successfully!");
 
@@ -120,25 +157,23 @@ pub fn init_ipc_worker(input_tx: Sender<InputEvent>) {
                             std::thread::yield_now();
                         }
 
-                        let command_byte = std::ptr::read_volatile(std::ptr::addr_of!(
-                            (*control_ptr).python_response_byte
-                        ));
+                        let timestamp = spin_start.elapsed().as_millis() as u32;
+                        for (i, action) in actions.iter().enumerate() {
+                            let command_byte = std::ptr::read_volatile(response_bytes_ptr.add(i));
 
-                        if command_byte == 0x20 {
-                            let timestamp = spin_start.elapsed().as_millis() as u32;
-                            let _ = input_tx.send(InputEvent::Keyboard {
-                                keycode: 57,
-                                pressed: true,
-                                time: timestamp,
-                            });
-                        }
-                        if command_byte == 0x21 {
-                            let timestamp = spin_start.elapsed().as_millis() as u32;
-                            let _ = input_tx.send(InputEvent::Keyboard {
-                                keycode: 57,
-                                pressed: false,
-                                time: timestamp + 20,
-                            });
+                            if command_byte == action.pressed_byte {
+                                let _ = input_tx.send(InputEvent::Keyboard {
+                                    keycode: action.keycode,
+                                    pressed: true,
+                                    time: timestamp,
+                                });
+                            } else if command_byte == action.released_byte {
+                                let _ = input_tx.send(InputEvent::Keyboard {
+                                    keycode: action.keycode,
+                                    pressed: false,
+                                    time: timestamp + 20,
+                                });
+                            }
                         }
                     },
 

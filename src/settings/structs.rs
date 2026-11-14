@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -6,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub struct EnvToml {
     pub visual: EnvVisual,
     pub shared: EnvShared,
+    pub learning: EnvLearning,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -33,7 +36,23 @@ impl Default for EnvShared {
     fn default() -> Self {
         EnvShared {
             lane_1: "default".to_string(),
-            lane_2: "1".to_string(),
+            lane_2: "default".to_string(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvLearning {
+    pub learning_rate: f32,
+    pub trace_delay: f32,
+}
+
+impl Default for EnvLearning {
+    fn default() -> Self {
+        EnvLearning {
+            learning_rate: 0.05,
+            trace_delay: 0.9,
         }
     }
 }
@@ -44,6 +63,7 @@ impl Default for EnvShared {
 pub struct SaveToml {
     pub application: SaveApplication,
     pub options: SaveOptions,
+    pub inputs: HashMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -77,4 +97,22 @@ impl Default for SaveOptions {
             quiet: false,
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(deny_unknown_fields)]
+#[derive(Default)]
+pub struct CurrentToml {
+    pub application: SaveApplication,
+    pub options: SaveOptions,
+    pub inputs: HashMap<u32, Input>,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(deny_unknown_fields)]
+#[derive(Default)]
+pub struct Input {
+    pub released: u8,
+    pub pressed: u8,
+    pub neuron: String,
 }

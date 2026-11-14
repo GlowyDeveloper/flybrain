@@ -873,64 +873,64 @@ impl CompositorHandler for State {
             );
         }
 
-        if let Some(buffer) = buffer.filter(|_| capture) {
-            match with_buffer_contents(&buffer, |ptr, len, metadata| {
-                let (width, height, stride) = (metadata.width, metadata.height, metadata.stride);
+        if let Some(buffer) = buffer {
+            if capture {
+                match with_buffer_contents(&buffer, |ptr, len, metadata| {
+                    let (width, height, stride) =
+                        (metadata.width, metadata.height, metadata.stride);
 
-                let mut frame = self.shared_frame.lock().unwrap();
+                    let mut frame = self.shared_frame.lock().unwrap();
 
-                frame.width = width as u32;
-                frame.height = height as u32;
-                frame.pixels.resize((width * height) as usize, 0);
+                    frame.width = width as u32;
+                    frame.height = height as u32;
+                    frame.pixels.resize((width * height) as usize, 0);
 
-                let src = unsafe { std::slice::from_raw_parts(ptr, len) };
+                    let src = unsafe { std::slice::from_raw_parts(ptr, len) };
 
-                for y in 0..height as usize {
-                    let row_start = y * stride as usize;
-                    let row_end = row_start + width as usize * 4;
+                    for y in 0..height as usize {
+                        let row_start = y * stride as usize;
+                        let row_end = row_start + width as usize * 4;
 
-                    if row_end > src.len() {
-                        warn!(
-                            "bad row {} (stride={} fmt={:?} len={})",
-                            y,
-                            stride,
-                            metadata.format,
-                            src.len()
-                        );
-                        continue;
+                        if row_end > src.len() {
+                            warn!(
+                                "bad row {} (stride={} fmt={:?} len={})",
+                                y,
+                                stride,
+                                metadata.format,
+                                src.len()
+                            );
+                            continue;
+                        }
+
+                        let row = &src[row_start..row_end];
+
+                        for x in 0..width as usize {
+                            let b = row[x * 4] as u32;
+                            let g = row[x * 4 + 1] as u32;
+                            let r = row[x * 4 + 2] as u32;
+
+                            frame.pixels[y * width as usize + x] = (r << 16) | (g << 8) | b;
+                        }
                     }
 
-                    let row = &src[row_start..row_end];
-
-                    for x in 0..width as usize {
-                        let b = row[x * 4] as u32;
-                        let g = row[x * 4 + 1] as u32;
-                        let r = row[x * 4 + 2] as u32;
-
-                        frame.pixels[y * width as usize + x] = (r << 16) | (g << 8) | b;
+                    if let Some(tx) = IPC_TX.get() {
+                        let _ = tx.send(IpcMessage::Frame(PendingFrame {
+                            pixels: frame.pixels.clone(),
+                            width: frame.width,
+                            height: frame.height,
+                        }));
                     }
-                }
-
-                if let Some(tx) = IPC_TX.get() {
-                    let _ = tx.send(IpcMessage::Frame(PendingFrame {
-                        pixels: frame.pixels.clone(),
-                        width: frame.width,
-                        height: frame.height,
-                    }));
-                }
-            }) {
-                Ok(()) => {
-                    CAPTURED.fetch_add(1, Ordering::Relaxed);
-                    buffer.release();
-                    self.proxy
-                        .send_event(UserEvent::FrameReady(self.cursor.clone()))
-                        .ok();
-                }
-
-                Err(e) => {
-                    warn!("Could not read XWayland buffer as SHM: {:?}", e);
+                }) {
+                    Ok(()) => {
+                        CAPTURED.fetch_add(1, Ordering::Relaxed);
+                        self.proxy
+                            .send_event(UserEvent::FrameReady(self.cursor.clone()))
+                            .ok();
+                    }
+                    Err(e) => warn!("Could not read XWayland buffer as SHM: {:?}", e),
                 }
             }
+            buffer.release();
         }
 
         self.maybe_report();

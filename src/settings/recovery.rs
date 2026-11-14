@@ -1,5 +1,5 @@
 use crate::settings::structs::{
-    EnvShared, EnvToml, EnvVisual, SaveApplication, SaveOptions, SaveToml,
+    EnvLearning, EnvShared, EnvToml, EnvVisual, SaveApplication, SaveOptions, SaveToml,
 };
 use toml::Value;
 use tracing::error;
@@ -21,6 +21,10 @@ pub fn fix_env_toml(broken_content: &str) -> EnvToml {
 
     if let Some(shared) = raw_value.get("shared") {
         default.shared = fix_shared(shared);
+    }
+
+    if let Some(learning) = raw_value.get("learning") {
+        default.learning = fix_learning(learning);
     }
 
     default
@@ -49,6 +53,19 @@ pub fn fix_shared(broken: &Value) -> EnvShared {
     default
 }
 
+pub fn fix_learning(broken: &Value) -> EnvLearning {
+    let mut default = EnvLearning::default();
+
+    if let Some(learning_rate) = broken.get("learning_rate").and_then(|v| v.as_float()) {
+        default.learning_rate = learning_rate as f32;
+    }
+    if let Some(trace_delay) = broken.get("trace_delay").and_then(|v| v.as_float()) {
+        default.trace_delay = trace_delay as f32;
+    }
+
+    default
+}
+
 pub fn fix_save_toml(broken_content: &str) -> SaveToml {
     let raw_value: Value = match toml::from_str(broken_content) {
         Ok(val) => val,
@@ -66,6 +83,15 @@ pub fn fix_save_toml(broken_content: &str) -> SaveToml {
 
     if let Some(options) = raw_value.get("options") {
         default.options = fix_options(options);
+    }
+
+    if let Some(inputs) = raw_value.get("inputs")
+        && let Some(inputs) = inputs.as_table()
+    {
+        default.inputs = inputs
+            .iter()
+            .map(|(name, value)| (name.clone(), value.to_string()))
+            .collect();
     }
 
     default

@@ -3,6 +3,7 @@ import time
 import pathlib
 import tomllib
 from multiprocessing import shared_memory
+from zipfile import BadZipfile
 import numpy as np
 from flybrain import FlyBrain
 
@@ -21,7 +22,12 @@ if lane_1 == "default":
 else:
     lane_1 = int(lane_1)
 
-lane_2 = int(env["shared"]["lane_2"])
+lane_2 = env["shared"]["lane_2"]
+if lane_2 == "default":
+    lane_2 = len(current["inputs"])
+else:
+    lane_2 = int(lane_2)
+
 width = int(current["options"]["width"])
 height = int(current["options"]["height"])
 control_size = 64
@@ -37,39 +43,76 @@ except FileNotFoundError:
 
 shm = shared_memory.SharedMemory(name=SHM_NAME, create=True, size=total)
 py_to_rust_buf = shm.buf[0:lane_1]
-control_block_offset = (lane_1 + 7) & ~7
-rust_to_py_buf = shm.buf[control_block_offset : control_block_offset + 1]
-control_flags  = shm.buf[control_block_offset + 8  : control_block_offset + 24]
-trainer_flags  = shm.buf[control_block_offset + 24 : control_block_offset + 40]
+lane_2_buf = shm.buf[lane_1 : lane_1 + lane_2]
+control_block_offset = (lane_1 + lane_2 + 7) & ~7
+control_flags  = shm.buf[control_block_offset      : control_block_offset + 16]
+trainer_flags  = shm.buf[control_block_offset + 16 : control_block_offset + 32]
 
 rx_frame = np.ndarray((height, width, 3), dtype=np.uint8, buffer=py_to_rust_buf)
-tx_byte = np.ndarray((1,), dtype=np.uint8, buffer=rust_to_py_buf)
 sync_markers = np.ndarray((2,), dtype=np.int64, buffer=control_flags)
 trainer_markers = np.ndarray((2,), dtype=np.int64, buffer=trainer_flags)
 
 brain = FlyBrain(data=brain_dir, device="auto")
 
+action_codes = sorted(current["inputs"].keys(), key=int)
+actions = [
+    {
+        "code": code,
+        "neuron": current["inputs"][code]["neuron"],
+        "pressed": int(current["inputs"][code]["pressed"]),
+        "released": int(current["inputs"][code]["released"]),
+    }
+    for code in action_codes
+]
+n_actions = len(actions)
+
+if lane_2 != n_actions:
+    raise ValueError(
+        f"lane_2 size ({lane_2}) doesn't match the number of configured "
+        f"inputs ({n_actions}); check env.toml's [shared] lane_2 setting."
+    )
+
+tx_bytes = np.ndarray((n_actions,), dtype=np.uint8, buffer=lane_2_buf)
+
 loom_detectors = brain.cells(["LC4", "LPLC2"])
-escape_neurons = brain.cells(["DNp01"])
-TRACKED = list(loom_detectors) + list(escape_neurons)
+action_neurons = brain.cells([a["neuron"] for a in actions])
+
+TRACKED = list(loom_detectors) + list(action_neurons)
 TRACKED_INDEX = {nid: i for i, nid in enumerate(TRACKED)}
 N_FEATURES = len(TRACKED) + 1
 
-JUMP_PRESS, JUMP_RELEASE = 0x20, 0x21
-
 WEIGHTS_PATH = pathlib.Path(brain_dir).parent / "current.npz"
-LEARNING_RATE = 0.05
-TRACE_DECAY = 0.9
+learning_rate = env["learning"]["learning_rate"]
+trace_delay = env["learning"]["trace_delay"]
 
 if WEIGHTS_PATH.exists():
-    saved = np.load(WEIGHTS_PATH)
-    w, b = saved["w"], float(saved["b"])
-    print("Loaded trained policy")
+    try:
+        saved = np.load(WEIGHTS_PATH)
+        w, b = saved["w"], saved["b"]
+        if w.shape != (n_actions, N_FEATURES) or b.shape != (n_actions,):
+            print("Saved policy doesn't match current inputs/neurons — starting fresh")
+            w = np.zeros((n_actions, N_FEATURES), dtype=np.float64)
+            b = np.zeros(n_actions, dtype=np.float64)
+        else:
+            print("Loaded trained policy")
+    except ValueError:
+        print("Invalid data in policy")
+        w = np.zeros((n_actions, N_FEATURES), dtype=np.float64)
+        b = np.zeros(n_actions, dtype=np.float64)
+    except EOFError:
+        print("No data in policy")
+        w = np.zeros((n_actions, N_FEATURES), dtype=np.float64)
+        b = np.zeros(n_actions, dtype=np.float64)
+    except BadZipfile:
+        print("Invalid data in policy (Not a zip)")
+        w = np.zeros((n_actions, N_FEATURES), dtype=np.float64)
+        b = np.zeros(n_actions, dtype=np.float64)
 else:
-    w, b = np.zeros(N_FEATURES, dtype=np.float64), 0.0
+    w = np.zeros((n_actions, N_FEATURES), dtype=np.float64)
+    b = np.zeros(n_actions, dtype=np.float64)
 
 e_w = np.zeros_like(w)
-e_b = 0.0
+e_b = np.zeros_like(b)
 rng = np.random.default_rng()
 
 def sigmoid(x):
@@ -85,7 +128,7 @@ def features_from(fired, delta):
     return x
 
 prev_strip = None
-jumping = False
+pressed_state = [False] * n_actions
 last_trainer_seq = 0
 
 try:
@@ -107,17 +150,18 @@ try:
             x = features_from(fired, delta)
 
             p = sigmoid(w @ x + b)
-            should_jump = bool(rng.random() < p)
+            should_press = rng.random(n_actions) < p
 
-            e_w = TRACE_DECAY * e_w + x * (float(should_jump) - p)
-            e_b = TRACE_DECAY * e_b + (float(should_jump) - p)
+            e_w = trace_delay * e_w + np.outer(should_press.astype(np.float64) - p, x)
+            e_b = trace_delay * e_b + (should_press.astype(np.float64) - p)
 
-            if should_jump and not jumping:
-                tx_byte[0] = JUMP_PRESS
-                jumping = True
-            elif jumping:
-                tx_byte[0] = JUMP_RELEASE
-                jumping = False
+            for i, action in enumerate(actions):
+                if should_press[i] and not pressed_state[i]:
+                    tx_bytes[i] = action["pressed"]
+                    pressed_state[i] = True
+                elif not should_press[i] and pressed_state[i]:
+                    tx_bytes[i] = action["released"]
+                    pressed_state[i] = False
 
             sync_markers[1] = last_seen_frame
 
@@ -126,10 +170,10 @@ try:
             last_trainer_seq = trainer_seq
             reward = float(trainer_markers[1])
 
-            w += LEARNING_RATE * reward * e_w
-            b += LEARNING_RATE * reward * e_b
+            w += learning_rate * reward * e_w
+            b += learning_rate * reward * e_b
             e_w[:] = 0.0
-            e_b = 0.0
+            e_b[:] = 0.0
 
             np.savez(WEIGHTS_PATH, w=w, b=b)
             print(f"{'Rewarded' if reward > 0 else 'Penalized'} — policy saved")
@@ -139,8 +183,8 @@ except KeyboardInterrupt:
     pass
 finally:
     np.savez(WEIGHTS_PATH, w=w, b=b)
-    del rx_frame, tx_byte, sync_markers, trainer_markers
-    del py_to_rust_buf, rust_to_py_buf, control_flags, trainer_flags
+    del rx_frame, tx_bytes, sync_markers, trainer_markers
+    del py_to_rust_buf, lane_2_buf, control_flags, trainer_flags
     shm.close()
     shm.unlink()
     print("\nShared memory unlinked cleanly.")

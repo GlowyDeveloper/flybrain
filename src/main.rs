@@ -2,7 +2,10 @@ use crate::{
     framebuffer::{FrameBuffer, SharedFrame},
     input::InputEvent,
     memory_bridge::init_ipc_worker,
-    settings::{initilize_tomls, structs::SaveToml},
+    settings::{
+        initilize_tomls,
+        structs::{CurrentToml, EnvToml, SaveToml},
+    },
     state::{ClientState, State},
     window::{App, UserEvent},
 };
@@ -47,7 +50,9 @@ pub const ENDC: &str = "\x1b[0m";
 
 pub static PYTHON: Mutex<&str> = Mutex::new("");
 pub static VERBOSITY: Mutex<Verbosity> = Mutex::new(Verbosity::Normal);
-pub static SAVE: LazyLock<Mutex<SaveToml>> = LazyLock::new(|| Mutex::new(SaveToml::default()));
+pub static SAVE: LazyLock<Mutex<CurrentToml>> =
+    LazyLock::new(|| Mutex::new(CurrentToml::default()));
+pub static ENV: LazyLock<Mutex<EnvToml>> = LazyLock::new(|| Mutex::new(EnvToml::default()));
 pub static NAME: Mutex<String> = Mutex::new(String::new());
 
 #[derive(Debug, Clone, PartialEq, Copy)]
@@ -74,6 +79,7 @@ fn help() {
     println!("    {GREEN}-window <title>{ENDC}   Display output in the specified window.");
     println!("    {GREEN}-fullscreen{ENDC}       Force fullscreen mode.");
     println!("    {GREEN}-quiet{ENDC}            Suppress application logs.");
+    println!("    {GREEN}-inputs [inputs]{ENDC}  The buttons that can be pressed.");
     println!();
     println!("{HEADER}Flags:{ENDC}                Flags are not saved to a save's toml file.");
     println!("    {GREEN}-v{ENDC}                Enable verbose logging.");
@@ -144,10 +150,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings::get_created(name.clone())
     };
 
-    settings::write_current(&toml);
+    let current = settings::write_current(&toml);
 
-    *SAVE.lock().unwrap() = toml.clone();
+    *SAVE.lock().unwrap() = current.clone();
     *NAME.lock().unwrap() = name.clone();
+    *ENV.lock().unwrap() = settings::get_env();
 
     *PYTHON.lock().unwrap() = python::get_python();
     python::install_pip_dependencies()?;
@@ -157,14 +164,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn save_policy() {
-    std::fs::copy(
-        settings::dot_flybrain().join("current.npz"),
-        settings::dot_flybrain()
-            .join("saves")
-            .join(NAME.lock().unwrap().clone())
-            .join("policy.npz"),
-    )
-    .unwrap();
+    let current = settings::dot_flybrain().join("current.npz");
+    let policy = settings::dot_flybrain()
+        .join("saves")
+        .join(NAME.lock().unwrap().clone())
+        .join("policy.npz");
+
+    let before = std::fs::metadata(&policy).unwrap().len();
+    let expected = std::fs::metadata(&current).unwrap().len();
+
+    let copied = std::fs::copy(&current, &policy);
+
+    let after = std::fs::metadata(&policy).unwrap().len();
+
+    debug!(
+        "before: {} expected: {} copied: {:?} after: {}",
+        before, expected, copied, after
+    );
+
+    if let Ok(copied) = copied {
+        if !after == copied {
+            error!("{:#?} couldn't be copied to {:#?}", current, policy);
+        }
+    } else {
+        error!(
+            "{:#?} couldn't be copied to {:#?}: {:#?}",
+            current, policy, copied
+        );
+    }
 }
 
 fn start(toml: SaveToml) -> Result<(), Box<dyn std::error::Error>> {

@@ -2,7 +2,7 @@ use crate::{
     SAVE,
     framebuffer::SharedFrame,
     input::InputEvent,
-    memory_bridge::{IPC_TX, IpcMessage, PendingFrame},
+    memory_bridge::{FRAME_SLOT, PendingFrame},
     window::UserEvent,
 };
 use smithay::{
@@ -913,12 +913,16 @@ impl CompositorHandler for State {
                         }
                     }
 
-                    if let Some(tx) = IPC_TX.get() {
-                        let _ = tx.send(IpcMessage::Frame(PendingFrame {
+                    if let Some(slot) = FRAME_SLOT.get() {
+                        let mut latest = slot.latest.lock().unwrap();
+
+                        *latest = Some(PendingFrame {
                             pixels: frame.pixels.clone(),
                             width: frame.width,
                             height: frame.height,
-                        }));
+                        });
+
+                        let _ = slot.notification.send(());
                     }
                 }) {
                     Ok(()) => {

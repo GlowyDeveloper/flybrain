@@ -2,7 +2,7 @@ use crate::{ENV, SAVE, input::InputEvent};
 use shared_memory::ShmemConf;
 use std::{
     sync::{
-        OnceLock,
+        Arc, Mutex, OnceLock,
         mpsc::{self, Sender},
     },
     time::{Duration, Instant},
@@ -40,7 +40,14 @@ struct ActionChannel {
     released_byte: u8,
 }
 
+pub struct FrameSlot {
+    pub latest: Mutex<Option<PendingFrame>>,
+    pub notification: Sender<()>,
+}
+
 pub static IPC_TX: OnceLock<Sender<IpcMessage>> = OnceLock::new();
+
+pub static FRAME_SLOT: OnceLock<Arc<FrameSlot>> = OnceLock::new();
 
 pub fn send_trainer_signal(signal: TrainerSignal) {
     if let Some(tx) = IPC_TX.get() {
@@ -50,7 +57,16 @@ pub fn send_trainer_signal(signal: TrainerSignal) {
 
 pub fn init_ipc_worker(input_tx: Sender<InputEvent>) {
     let (tx, rx) = mpsc::channel::<IpcMessage>();
+    let (frame_tx, frame_rx) = mpsc::channel::<()>();
+
     let _ = IPC_TX.set(tx);
+
+    let frame_slot = Arc::new(FrameSlot {
+        latest: Mutex::new(None),
+        notification: frame_tx,
+    });
+
+    let _ = FRAME_SLOT.set(frame_slot.clone());
 
     std::thread::Builder::new()
         .name("flybrain_ipc_worker".to_string())
@@ -60,7 +76,7 @@ pub fn init_ipc_worker(input_tx: Sender<InputEvent>) {
             let shmem = match ShmemConf::new().os_id("flybrain_ipc_buffer").open() {
                 Ok(s) => s,
                 Err(e) => {
-                    error!("❌ Failed to attach to shared memory buffer: {}", e);
+                    error!("Failed to attach to shared memory buffer: {}", e);
                     std::process::exit(1);
                 }
             };
@@ -116,9 +132,13 @@ pub fn init_ipc_worker(input_tx: Sender<InputEvent>) {
 
             println!("Asynchronous IPC Worker initialized successfully!");
 
-            while let Ok(msg) = rx.recv() {
-                match msg {
-                    IpcMessage::Frame(frame) => unsafe {
+            while let Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) =
+                frame_rx.recv_timeout(Duration::from_millis(2))
+            {
+                let frame = frame_slot.latest.lock().unwrap().take();
+
+                if let Some(frame) = frame {
+                    unsafe {
                         if lane_1_size > shmem.len() {
                             info!(
                                 "Frame size ({} bytes) exceeds shared memory pool limit",
@@ -175,9 +195,11 @@ pub fn init_ipc_worker(input_tx: Sender<InputEvent>) {
                                 });
                             }
                         }
-                    },
+                    }
+                }
 
-                    IpcMessage::Trainer(signal) => unsafe {
+                while let Ok(IpcMessage::Trainer(signal)) = rx.try_recv() {
+                    unsafe {
                         trainer_seq += 1;
                         let value: i64 = match signal {
                             TrainerSignal::Reward => 1,
@@ -194,7 +216,7 @@ pub fn init_ipc_worker(input_tx: Sender<InputEvent>) {
                         );
 
                         info!("Sent trainer signal: {:?}", signal);
-                    },
+                    }
                 }
             }
         })
